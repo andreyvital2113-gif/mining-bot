@@ -61,6 +61,15 @@ CATEGORY_EMOJI = {
 
 NO_FULL = {"Переработка (промывка) песков"}  # нет марк.замера и учёта
 
+WORK_TYPE_ORDER = ["Вскрыша", "Добыча (Пески)", "Навалы", "Прочие", "Итого горная масса"]
+WORK_TYPE_EMOJI = {
+    "Вскрыша": "🚛",
+    "Добыча (Пески)": "⛏️",
+    "Навалы": "🪨",
+    "Прочие": "📦",
+    "Итого горная масса": "📊",
+}
+
 # ====== ДАННЫЕ ПО ГОДАМ ======
 # YEARS_DATA[год]["categories"][категория][показатель] = [12 значений]
 # YEARS_DATA[год]["excavators"][экскаватор][показатель] = [12 значений]
@@ -232,8 +241,9 @@ def find_col_by_header_text(header_row, text):
 def parse_month_sheet_excavators(rows):
     """
     Разбирает лист конкретного месяца: ищет блок между строкой 'Экскавация'
-    и строкой 'Переработка (промывка) песков', извлекает по каждому экскаватору
-    строку 'Итого горная масса'.
+    и строкой 'Переработка (промывка) песков'. Для каждого экскаватора извлекает
+    ВСЕ строки вида работ (Вскрыша, Добыча (Пески), Навалы, Прочие, Итого горная масса).
+    Возвращает {экскаватор: {вид_работ: {ind_key: значение}}}.
     """
     header_row_idx = None
     name_col = work_col = None
@@ -264,7 +274,7 @@ def parse_month_sheet_excavators(rows):
                 continue
             current_name = name_text
 
-        if current_name and work_text and "итого горная масса" in work_text.lower():
+        if current_name and work_text:
             values = {}
             for ind_key, col in ind_cols.items():
                 v = row[col] if col < len(row) else None
@@ -275,7 +285,7 @@ def parse_month_sheet_excavators(rows):
                 except (TypeError, ValueError):
                     v = 0
                 values[ind_key] = v
-            excavators[current_name] = values
+            excavators.setdefault(current_name, {})[work_text] = values
 
     return excavators
 
@@ -303,11 +313,13 @@ def parse_excel(path):
             continue
         m_rows = list(wb[sheet_name].iter_rows(values_only=True))
         month_result = parse_month_sheet_excavators(m_rows)
-        for exc_name, vals in month_result.items():
-            if exc_name not in excavators:
-                excavators[exc_name] = {k: [0] * 12 for k in IND}
-            for ind_key, v in vals.items():
-                excavators[exc_name][ind_key][m_idx] = v
+        for exc_name, wt_dict in month_result.items():
+            excavators.setdefault(exc_name, {})
+            for wt, vals in wt_dict.items():
+                if wt not in excavators[exc_name]:
+                    excavators[exc_name][wt] = {k: [0] * 12 for k in IND}
+                for ind_key, v in vals.items():
+                    excavators[exc_name][wt][ind_key][m_idx] = v
 
     return categories, excavators, months_found, len(excavators) > 0
 
@@ -470,6 +482,17 @@ def excavators_menu(year):
     return kb
 
 
+def work_type_menu(year, excavator):
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    available = YEARS_DATA[year]["excavators"].get(excavator, {})
+    ordered = [w for w in WORK_TYPE_ORDER if w in available] + \
+              [w for w in available if w not in WORK_TYPE_ORDER]
+    for wt in ordered:
+        kb.add(f"{WORK_TYPE_EMOJI.get(wt, '📌')} {wt}")
+    kb.add("⬅️ Назад")
+    return kb
+
+
 def ind_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
     kb.add("📊 Факт по статистике")
@@ -573,10 +596,22 @@ def choose_item_cat(msg):
 
 
 @bot.message_handler(func=lambda m: user_state.get(m.chat.id, {}).get("section") == "excavators"
+                      and "item" not in user_state.get(m.chat.id, {})
                       and strip_emoji_prefix(m.text) in YEARS_DATA.get(user_state.get(m.chat.id, {}).get("year", ""), {}).get("excavators", {}))
 def choose_item_exc(msg):
     st = user_state[msg.chat.id]
     st["item"] = strip_emoji_prefix(msg.text)
+    bot.send_message(msg.chat.id, "Выбери вид работ:", reply_markup=work_type_menu(st["year"], st["item"]))
+
+
+@bot.message_handler(func=lambda m: user_state.get(m.chat.id, {}).get("section") == "excavators"
+                      and "item" in user_state.get(m.chat.id, {})
+                      and "work_type" not in user_state.get(m.chat.id, {})
+                      and strip_emoji_prefix(m.text) in YEARS_DATA.get(user_state.get(m.chat.id, {}).get("year", ""), {})
+                          .get("excavators", {}).get(user_state.get(m.chat.id, {}).get("item", ""), {}))
+def choose_work_type(msg):
+    st = user_state[msg.chat.id]
+    st["work_type"] = strip_emoji_prefix(msg.text)
     bot.send_message(msg.chat.id, "С чем сравнить план?", reply_markup=ind_menu())
 
 
@@ -585,6 +620,9 @@ def choose_period(msg):
     st = user_state.setdefault(msg.chat.id, {})
     if "item" not in st:
         bot.send_message(msg.chat.id, "Сначала выбери направление/экскаватор.")
+        return
+    if st.get("section") == "excavators" and "work_type" not in st:
+        bot.send_message(msg.chat.id, "Сначала выбери вид работ.")
         return
     st["ind"] = IND_LABEL_TO_KEY[msg.text]
     st["awaiting_period"] = False
@@ -610,14 +648,23 @@ def render_report(msg, month_range, period_label):
     year = st.get("year")
     section = st.get("section")
     item = st.get("item")
+    work_type = st.get("work_type")
     ind_key = st.get("ind")
 
-    if not all([year, section, item, ind_key]):
-        bot.send_message(msg.chat.id, "Начни заново: /start")
-        return
-
-    data_block = YEARS_DATA[year]["categories" if section == "categories" else "excavators"]
-    data = data_block[item]
+    if section == "categories":
+        if not all([year, section, item, ind_key]):
+            bot.send_message(msg.chat.id, "Начни заново: /start")
+            return
+        data = YEARS_DATA[year]["categories"][item]
+        display_name = item
+        emoji = CATEGORY_EMOJI.get(item, "📁")
+    else:
+        if not all([year, section, item, work_type, ind_key]):
+            bot.send_message(msg.chat.id, "Начни заново: /start")
+            return
+        data = YEARS_DATA[year]["excavators"][item][work_type]
+        display_name = f"{item} — {work_type}"
+        emoji = WORK_TYPE_EMOJI.get(work_type, "🚜")
 
     ind_key_used = ind_key
     fallback_note = ""
@@ -627,14 +674,13 @@ def render_report(msg, month_range, period_label):
 
     plan = data["plan"]
     fact = data[ind_key_used]
-    emoji = CATEGORY_EMOJI.get(item, "🚜") if section == "categories" else "🚜"
 
-    report = format_report(year, section, item, emoji, ind_key_used, plan, fact, month_range, fallback_note)
+    report = format_report(year, section, display_name, emoji, ind_key_used, plan, fact, month_range, fallback_note)
     kb = cats_menu(year) if section == "categories" else excavators_menu(year)
     bot.send_message(msg.chat.id, report, reply_markup=kb)
 
     if st.get("want_chart"):
-        chart_buf = generate_chart(item, IND[ind_key_used], plan, fact, month_range)
+        chart_buf = generate_chart(display_name, IND[ind_key_used], plan, fact, month_range)
         if chart_buf:
             bot.send_photo(msg.chat.id, chart_buf)
         else:
@@ -723,25 +769,37 @@ def handle_excel(msg):
 def go_back(msg):
     st = user_state.get(msg.chat.id, {})
     st["awaiting_period"] = False
+    section = st.get("section")
+
     if "ind" in st:
         st.pop("ind")
-        section = st.get("section")
-        item = st.get("item")
-        if item:
-            st.pop("item")
-            bot.send_message(msg.chat.id, "Выбери направление:",
-                              reply_markup=cats_menu(st["year"]) if section == "categories" else excavators_menu(st["year"]))
-            return
+        bot.send_message(msg.chat.id, "С чем сравнить план?", reply_markup=ind_menu())
+        return
+
+    if section == "excavators" and "work_type" in st:
+        st.pop("work_type")
+        bot.send_message(msg.chat.id, "Выбери вид работ:", reply_markup=work_type_menu(st["year"], st["item"]))
+        return
+
+    if "item" in st:
+        st.pop("item")
+        if section == "categories":
+            bot.send_message(msg.chat.id, "Выбери направление:", reply_markup=cats_menu(st["year"]))
+        else:
+            bot.send_message(msg.chat.id, "Выбери экскаватор:", reply_markup=excavators_menu(st["year"]))
+        return
+
     if "section" in st:
         st.pop("section")
-        st.pop("item", None)
         st["want_chart"] = False
         bot.send_message(msg.chat.id, "Выбери раздел:", reply_markup=section_menu())
         return
+
     if "year" in st:
         st.pop("year")
         bot.send_message(msg.chat.id, "📅 Выбери год:", reply_markup=years_menu())
         return
+
     start(msg)
 
 
