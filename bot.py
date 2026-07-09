@@ -379,24 +379,41 @@ def generate_two_bar_chart(title, subtitle, plan_val, fact_val):
 
 
 def generate_chart(item_name, ind_label, plan, fact, month_range):
-    months_sel, plan_vals, fact_vals = [], [], []
+    labels, plan_vals, fact_vals = [], [], []
     for i in month_range:
         if plan[i] == 0 and fact[i] == 0:
             continue
-        months_sel.append(MONTHS[i])
+        labels.append(MONTHS[i])
         plan_vals.append(plan[i])
         fact_vals.append(fact[i])
 
-    if not months_sel:
+    if not labels:
         return None
 
-    x = range(len(months_sel))
+    if len(labels) > 1:
+        labels.append("Итого")
+        plan_vals.append(sum(plan_vals))
+        fact_vals.append(sum(fact_vals))
+
+    x = range(len(labels))
     width = 0.35
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.bar([i - width / 2 for i in x], plan_vals, width, label="План", color="#4C6EF5")
-    ax.bar([i + width / 2 for i in x], fact_vals, width, label="Факт", color="#37B24D")
+    fig, ax = plt.subplots(figsize=(max(8, len(labels) * 1.1), 5))
+
+    bars_plan = ax.bar([i - width / 2 for i in x], plan_vals, width, label="План", color="#4C6EF5")
+    bars_fact = ax.bar([i + width / 2 for i in x], fact_vals, width, label="Факт", color="#37B24D")
+
+    # выделяем столбец "Итого" другим оттенком
+    if labels[-1] == "Итого":
+        bars_plan[-1].set_color("#364FC7")
+        bars_fact[-1].set_color("#2B8A3E")
+
+    for b in list(bars_plan) + list(bars_fact):
+        h = b.get_height()
+        ax.annotate(fmt_num(h), (b.get_x() + b.get_width() / 2, h),
+                    ha="center", va="bottom", fontsize=8)
+
     ax.set_xticks(list(x))
-    ax.set_xticklabels(months_sel, rotation=30, ha="right")
+    ax.set_xticklabels(labels, rotation=30, ha="right")
     ax.set_ylabel(f"Объём, {UNIT}")
     ax.set_title(f"{item_name}\n{ind_label}")
     ax.legend()
@@ -617,21 +634,11 @@ def render_report(msg, month_range, period_label):
     bot.send_message(msg.chat.id, report, reply_markup=kb)
 
     if st.get("want_chart"):
-        months_sel = [i for i in month_range if not (plan[i] == 0 and fact[i] == 0)]
-        if not months_sel:
-            bot.send_message(msg.chat.id, "Нет данных для графика за выбранный период.")
-        elif len(months_sel) == 1:
-            i = months_sel[0]
-            buf = generate_two_bar_chart(item, f"{IND[ind_key_used]} — {MONTHS[i]}", plan[i], fact[i])
-            bot.send_photo(msg.chat.id, buf)
+        chart_buf = generate_chart(item, IND[ind_key_used], plan, fact, month_range)
+        if chart_buf:
+            bot.send_photo(msg.chat.id, chart_buf)
         else:
-            for i in months_sel:
-                buf = generate_two_bar_chart(item, f"{IND[ind_key_used]} — {MONTHS[i]}", plan[i], fact[i])
-                bot.send_photo(msg.chat.id, buf)
-            total_plan = sum(plan[i] for i in months_sel)
-            total_fact = sum(fact[i] for i in months_sel)
-            buf_total = generate_two_bar_chart(item, f"{IND[ind_key_used]} — Итого за период", total_plan, total_fact)
-            bot.send_photo(msg.chat.id, buf_total, caption="📊 Итог за весь выбранный период")
+            bot.send_message(msg.chat.id, "Нет данных для графика за выбранный период.")
 
 
 @bot.message_handler(func=lambda m: m.text == "🗓 Весь год")
