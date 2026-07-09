@@ -319,10 +319,9 @@ def extract_year_from_filename(filename):
 
 def fmt_num(v):
     """Форматирует число с разделением групп разрядов пробелом: 62000 -> 62 000."""
-    if isinstance(v, float) and v.is_integer():
-        v = int(v)
-    if isinstance(v, int):
-        return f"{v:,}".replace(",", " ")
+    v = float(v)
+    if v.is_integer():
+        return f"{int(v):,}".replace(",", " ")
     return f"{v:,.2f}".replace(",", " ")
 
 
@@ -358,6 +357,25 @@ def format_report(year, section_label, item_name, item_emoji, ind_key_used, plan
         lines.append(fallback_note)
 
     return "\n".join(lines)
+
+
+def generate_two_bar_chart(title, subtitle, plan_val, fact_val):
+    fig, ax = plt.subplots(figsize=(4.5, 4.5))
+    bars = ax.bar(["План", "Факт"], [plan_val, fact_val], color=["#4C6EF5", "#37B24D"], width=0.5)
+    for b in bars:
+        h = b.get_height()
+        ax.annotate(fmt_num(h), (b.get_x() + b.get_width() / 2, h),
+                    ha="center", va="bottom", fontsize=10)
+    ax.set_ylabel(f"Объём, {UNIT}")
+    ax.set_title(f"{title}\n{subtitle}")
+    ax.grid(axis="y", linestyle="--", alpha=0.4)
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
 
 
 def generate_chart(item_name, ind_label, plan, fact, month_range):
@@ -406,11 +424,12 @@ def years_menu():
     return kb
 
 
-def section_menu():
+def section_menu(chart_mode=False):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
     kb.add("📁 Общие показатели")
     kb.add("🚜 Показатели по экскаваторам")
-    kb.add("📈 График выполнения")
+    if not chart_mode:
+        kb.add("📈 График выполнения")
     kb.add("⬅️ Назад")
     return kb
 
@@ -504,7 +523,7 @@ def enable_chart_mode(msg):
     bot.send_message(
         msg.chat.id,
         "📈 Режим графика включён.\nВыбери, по чему построить график:",
-        reply_markup=section_menu(),
+        reply_markup=section_menu(chart_mode=True),
     )
 
 
@@ -598,11 +617,21 @@ def render_report(msg, month_range, period_label):
     bot.send_message(msg.chat.id, report, reply_markup=kb)
 
     if st.get("want_chart"):
-        chart_buf = generate_chart(item, IND[ind_key_used], plan, fact, month_range)
-        if chart_buf:
-            bot.send_photo(msg.chat.id, chart_buf)
-        else:
+        months_sel = [i for i in month_range if not (plan[i] == 0 and fact[i] == 0)]
+        if not months_sel:
             bot.send_message(msg.chat.id, "Нет данных для графика за выбранный период.")
+        elif len(months_sel) == 1:
+            i = months_sel[0]
+            buf = generate_two_bar_chart(item, f"{IND[ind_key_used]} — {MONTHS[i]}", plan[i], fact[i])
+            bot.send_photo(msg.chat.id, buf)
+        else:
+            for i in months_sel:
+                buf = generate_two_bar_chart(item, f"{IND[ind_key_used]} — {MONTHS[i]}", plan[i], fact[i])
+                bot.send_photo(msg.chat.id, buf)
+            total_plan = sum(plan[i] for i in months_sel)
+            total_fact = sum(fact[i] for i in months_sel)
+            buf_total = generate_two_bar_chart(item, f"{IND[ind_key_used]} — Итого за период", total_plan, total_fact)
+            bot.send_photo(msg.chat.id, buf_total, caption="📊 Итог за весь выбранный период")
 
 
 @bot.message_handler(func=lambda m: m.text == "🗓 Весь год")
