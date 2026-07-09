@@ -372,8 +372,8 @@ def years_menu():
 
 def section_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
-    kb.add("📁 Категории")
-    kb.add("🚜 Экскаваторы")
+    kb.add("📁 Общие показатели")
+    kb.add("🚜 Показатели по экскаваторам")
     kb.add("⬅️ Назад")
     return kb
 
@@ -409,7 +409,6 @@ def ind_menu():
 def period_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
     kb.add(*[f"{MONTH_EMOJI[i]} {m}" for i, m in enumerate(MONTHS)])
-    kb.add("⏩ Январь–Апрель")
     kb.add("🗓 Весь год")
     kb.add("✏️ Свой период")
     kb.add("⬅️ Назад")
@@ -465,7 +464,7 @@ def choose_section(msg):
     bot.send_message(msg.chat.id, "Выбери раздел:", reply_markup=section_menu())
 
 
-@bot.message_handler(func=lambda m: m.text == "📁 Категории")
+@bot.message_handler(func=lambda m: m.text == "📁 Общие показатели")
 def open_categories(msg):
     st = user_state.setdefault(msg.chat.id, {})
     if "year" not in st:
@@ -475,7 +474,7 @@ def open_categories(msg):
     bot.send_message(msg.chat.id, "Выбери направление:", reply_markup=cats_menu(st["year"]))
 
 
-@bot.message_handler(func=lambda m: m.text == "🚜 Экскаваторы")
+@bot.message_handler(func=lambda m: m.text == "🚜 Показатели по экскаваторам")
 def open_excavators(msg):
     st = user_state.setdefault(msg.chat.id, {})
     if "year" not in st:
@@ -553,11 +552,6 @@ def render_report(msg, month_range, period_label):
     report = format_report(year, section, item, emoji, ind_key_used, plan, fact, month_range, fallback_note)
     kb = cats_menu(year) if section == "categories" else excavators_menu(year)
     bot.send_message(msg.chat.id, report, reply_markup=kb)
-
-
-@bot.message_handler(func=lambda m: m.text == "⏩ Январь–Апрель")
-def preset_jan_apr(msg):
-    render_report(msg, range(4), "Январь–Апрель")
 
 
 @bot.message_handler(func=lambda m: m.text == "🗓 Весь год")
