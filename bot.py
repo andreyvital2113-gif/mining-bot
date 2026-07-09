@@ -14,6 +14,7 @@ import openpyxl
 DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.json")
 
 TOKEN = os.environ.get("BOT_TOKEN", "ВСТАВЬ_СЮДА_ТОКЕН")
+ADMIN_ID = os.environ.get("ADMIN_ID")  # твой Telegram user_id, только он может грузить Excel
 bot = telebot.TeleBot(TOKEN)
 
 UNIT = "м³"
@@ -206,6 +207,75 @@ def parse_dynamic_groups(rows, header_row_idx, header_cols):
     return result, months_found
 
 
+def find_single_indicator_columns(header_row):
+    """Возвращает {ind_key: col_idx}, беря первое вхождение каждого показателя (не блоки по 4)."""
+    result = {}
+    for c_idx, val in enumerate(header_row):
+        if isinstance(val, str) and val.strip() in IND_TEXT_TO_KEY:
+            key = IND_TEXT_TO_KEY[val.strip()]
+            if key not in result:
+                result[key] = c_idx
+    return result
+
+
+def find_col_by_header_text(header_row, text):
+    for c_idx, val in enumerate(header_row):
+        if isinstance(val, str) and val.strip().lower() == text.lower():
+            return c_idx
+    return None
+
+
+def parse_month_sheet_excavators(rows):
+    """
+    Разбирает лист конкретного месяца: ищет блок между строкой 'Экскавация'
+    и строкой 'Переработка (промывка) песков', извлекает по каждому экскаватору
+    строку 'Итого горная масса'.
+    """
+    header_row_idx = None
+    name_col = work_col = None
+    ind_cols = {}
+    for r_idx, row in enumerate(rows):
+        n_col = find_col_by_header_text(row, "Наименование")
+        w_col = find_col_by_header_text(row, "Вид работ")
+        inds = find_single_indicator_columns(row)
+        if n_col is not None and w_col is not None and len(inds) >= 4:
+            header_row_idx, name_col, work_col, ind_cols = r_idx, n_col, w_col, inds
+            break
+    if header_row_idx is None:
+        return {}
+
+    excavators = {}
+    current_name = None
+    for row in rows[header_row_idx + 1:]:
+        name_val = row[name_col] if name_col < len(row) else None
+        work_val = row[work_col] if work_col < len(row) else None
+        name_text = name_val.strip() if isinstance(name_val, str) else None
+        work_text = work_val.strip() if isinstance(work_val, str) else None
+
+        if name_text:
+            low = name_text.lower()
+            if "переработка" in low:
+                break
+            if "экскавация" in low or "итого" in low:
+                continue
+            current_name = name_text
+
+        if current_name and work_text and "итого горная масса" in work_text.lower():
+            values = {}
+            for ind_key, col in ind_cols.items():
+                v = row[col] if col < len(row) else None
+                try:
+                    v = float(v)
+                    if v == int(v):
+                        v = int(v)
+                except (TypeError, ValueError):
+                    v = 0
+                values[ind_key] = v
+            excavators[current_name] = values
+
+    return excavators
+
+
 def parse_excel(path):
     wb = openpyxl.load_workbook(path, data_only=True)
 
@@ -217,21 +287,25 @@ def parse_excel(path):
         raise ValueError("Не нашёл строку с показателями на листе «Сводная».")
     categories, months_found = parse_fixed_groups(rows, header_row_idx, header_cols, CATEGORY_ORDER)
 
-    # --- лист экскаваторов (необязательный) ---
+    # --- экскаваторы: ищем по листам с названиями месяцев ---
     excavators = {}
-    exc_sheet_name = None
-    for name in wb.sheetnames:
-        if "экскав" in name.lower():
-            exc_sheet_name = name
-            break
+    for m_idx, m_name in enumerate(MONTHS):
+        sheet_name = None
+        for s in wb.sheetnames:
+            if s.strip().lower() == m_name.lower():
+                sheet_name = s
+                break
+        if not sheet_name:
+            continue
+        m_rows = list(wb[sheet_name].iter_rows(values_only=True))
+        month_result = parse_month_sheet_excavators(m_rows)
+        for exc_name, vals in month_result.items():
+            if exc_name not in excavators:
+                excavators[exc_name] = {k: [0] * 12 for k in IND}
+            for ind_key, v in vals.items():
+                excavators[exc_name][ind_key][m_idx] = v
 
-    if exc_sheet_name:
-        exc_rows = list(wb[exc_sheet_name].iter_rows(values_only=True))
-        exc_header_idx, exc_header_cols = find_header_row(exc_rows)
-        if exc_header_idx is not None:
-            excavators, _ = parse_dynamic_groups(exc_rows, exc_header_idx, exc_header_cols)
-
-    return categories, excavators, months_found, exc_sheet_name is not None
+    return categories, excavators, months_found, len(excavators) > 0
 
 
 def extract_year_from_filename(filename):
@@ -353,14 +427,18 @@ def parse_custom_period(text):
 
 
 # ================= хендлеры =================
+@bot.message_handler(commands=["myid"])
+def my_id(msg):
+    bot.send_message(msg.chat.id, f"🆔 Твой Telegram ID: `{msg.from_user.id}`", parse_mode="Markdown")
+
+
 @bot.message_handler(commands=["start"])
 def start(msg):
     user_state[msg.chat.id] = {}
     bot.send_message(
         msg.chat.id,
-        "🏔 Дашборд производственных показателей\n\n"
-        "Выбери «Начать» для отчёта, либо пришли Excel-файлом обновлённые данные "
-        "(год определяется по названию файла, например «Показатели_2026.xlsx»).",
+        "📈 Статистика производственных показателей\n\n"
+        "Выбери «Начать» для отчёта.",
         reply_markup=main_menu(),
     )
 
@@ -499,6 +577,10 @@ def custom_period_text(msg):
 
 @bot.message_handler(content_types=["document"])
 def handle_excel(msg):
+    if ADMIN_ID and str(msg.from_user.id) != str(ADMIN_ID):
+        bot.send_message(msg.chat.id, "⛔ Загружать данные может только администратор.")
+        return
+
     fname = msg.document.file_name or ""
     if not fname.lower().endswith((".xlsx", ".xlsm")):
         bot.send_message(msg.chat.id, "Пришли файл в формате .xlsx (Excel).")
@@ -531,7 +613,7 @@ def handle_excel(msg):
         save_data()
 
         exc_note = f"\n🚜 Экскаваторов найдено: {len(excavators)}" if has_exc_sheet else \
-            "\n🚜 Лист с экскаваторами не найден — данные по экскаваторам не тронуты."
+            "\n🚜 Данные по экскаваторам не найдены (нет листов по месяцам с блоком «Экскавация» — «Переработка (промывка) песков»)."
 
         bot.send_message(
             msg.chat.id,
