@@ -9,7 +9,11 @@ from telebot import types
 import os
 import re
 import json
+import io
 import openpyxl
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.json")
 
@@ -356,6 +360,38 @@ def format_report(year, section_label, item_name, item_emoji, ind_key_used, plan
     return "\n".join(lines)
 
 
+def generate_chart(item_name, ind_label, plan, fact, month_range):
+    months_sel, plan_vals, fact_vals = [], [], []
+    for i in month_range:
+        if plan[i] == 0 and fact[i] == 0:
+            continue
+        months_sel.append(MONTHS[i])
+        plan_vals.append(plan[i])
+        fact_vals.append(fact[i])
+
+    if not months_sel:
+        return None
+
+    x = range(len(months_sel))
+    width = 0.35
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.bar([i - width / 2 for i in x], plan_vals, width, label="План", color="#4C6EF5")
+    ax.bar([i + width / 2 for i in x], fact_vals, width, label="Факт", color="#37B24D")
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(months_sel, rotation=30, ha="right")
+    ax.set_ylabel(f"Объём, {UNIT}")
+    ax.set_title(f"{item_name}\n{ind_label}")
+    ax.legend()
+    ax.grid(axis="y", linestyle="--", alpha=0.4)
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
 # ================= клавиатуры =================
 def main_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -374,6 +410,7 @@ def section_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
     kb.add("📁 Общие показатели")
     kb.add("🚜 Показатели по экскаваторам")
+    kb.add("📈 График выполнения")
     kb.add("⬅️ Назад")
     return kb
 
@@ -442,26 +479,33 @@ def my_id(msg):
 
 @bot.message_handler(commands=["start"])
 def start(msg):
-    user_state[msg.chat.id] = {}
+    user_state[msg.chat.id] = {"want_chart": False}
     bot.send_message(
         msg.chat.id,
-        "📈 Статистика производственных показателей\n\n"
-        "Выбери «Начать» для отчёта.",
-        reply_markup=main_menu(),
+        "📈 Статистика производственных показателей\n\n📅 Выбери год:",
+        reply_markup=years_menu(),
     )
-
-
-@bot.message_handler(func=lambda m: m.text == "🚀 Начать")
-def choose_year(msg):
-    user_state[msg.chat.id] = {}
-    bot.send_message(msg.chat.id, "📅 Выбери год:", reply_markup=years_menu())
 
 
 @bot.message_handler(func=lambda m: m.text.startswith("📅 ") and m.text.replace("📅 ", "") in YEARS_DATA)
 def choose_section(msg):
     m_year = msg.text.replace("📅 ", "")
-    user_state[msg.chat.id] = {"year": m_year}
+    user_state[msg.chat.id] = {"year": m_year, "want_chart": False}
     bot.send_message(msg.chat.id, "Выбери раздел:", reply_markup=section_menu())
+
+
+@bot.message_handler(func=lambda m: m.text == "📈 График выполнения")
+def enable_chart_mode(msg):
+    st = user_state.setdefault(msg.chat.id, {})
+    if "year" not in st:
+        bot.send_message(msg.chat.id, "Сначала выбери год.", reply_markup=years_menu())
+        return
+    st["want_chart"] = True
+    bot.send_message(
+        msg.chat.id,
+        "📈 Режим графика включён.\nВыбери, по чему построить график:",
+        reply_markup=section_menu(),
+    )
 
 
 @bot.message_handler(func=lambda m: m.text == "📁 Общие показатели")
@@ -553,6 +597,13 @@ def render_report(msg, month_range, period_label):
     kb = cats_menu(year) if section == "categories" else excavators_menu(year)
     bot.send_message(msg.chat.id, report, reply_markup=kb)
 
+    if st.get("want_chart"):
+        chart_buf = generate_chart(item, IND[ind_key_used], plan, fact, month_range)
+        if chart_buf:
+            bot.send_photo(msg.chat.id, chart_buf)
+        else:
+            bot.send_message(msg.chat.id, "Нет данных для графика за выбранный период.")
+
 
 @bot.message_handler(func=lambda m: m.text == "🗓 Весь год")
 def preset_full_year(msg):
@@ -623,8 +674,8 @@ def handle_excel(msg):
             f"✅ Данные за {year} год обновлены.\n"
             f"📁 Категорий: {len(CATEGORY_ORDER)}\n"
             f"📆 Месяцев с данными: {months_found}"
-            f"{exc_note}\n\nСмотри отчёты: /start",
-            reply_markup=main_menu(),
+            f"{exc_note}\n\n📅 Выбери год для отчёта:",
+            reply_markup=years_menu(),
         )
     except ValueError as e:
         bot.send_message(msg.chat.id, f"⚠️ Не смог разобрать файл: {e}")
@@ -648,6 +699,7 @@ def go_back(msg):
     if "section" in st:
         st.pop("section")
         st.pop("item", None)
+        st["want_chart"] = False
         bot.send_message(msg.chat.id, "Выбери раздел:", reply_markup=section_menu())
         return
     if "year" in st:
@@ -659,7 +711,7 @@ def go_back(msg):
 
 @bot.message_handler(func=lambda m: True)
 def fallback(msg):
-    bot.send_message(msg.chat.id, "🤔 Не понял. Нажми /start.", reply_markup=main_menu())
+    bot.send_message(msg.chat.id, "🤔 Не понял. Выбери год:", reply_markup=years_menu())
 
 
 def setup_commands():
