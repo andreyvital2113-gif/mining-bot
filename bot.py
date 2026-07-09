@@ -313,6 +313,15 @@ def extract_year_from_filename(filename):
     return match.group(1) if match else None
 
 
+def fmt_num(v):
+    """Форматирует число с разделением групп разрядов пробелом: 62000 -> 62 000."""
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    if isinstance(v, int):
+        return f"{v:,}".replace(",", " ")
+    return f"{v:,.2f}".replace(",", " ")
+
+
 # ================= форматирование отчёта =================
 def format_report(year, section_label, item_name, item_emoji, ind_key_used, plan, fact,
                    month_range, fallback_note=""):
@@ -329,7 +338,7 @@ def format_report(year, section_label, item_name, item_emoji, ind_key_used, plan
         pct = round(f / p * 100, 1) if p > 0 else None
         pct_str = f"{pct}%" if pct is not None else "—"
         mark = "✅" if pct and pct >= 100 else ("⚠️" if pct is not None else "")
-        lines.append(f"{MONTH_EMOJI[i]} {MONTHS[i]}: план {p} {UNIT} / факт {f} {UNIT}  ({pct_str}) {mark}")
+        lines.append(f"{MONTH_EMOJI[i]} {MONTHS[i]}: план {fmt_num(p)} {UNIT} / факт {fmt_num(f)} {UNIT}  ({pct_str}) {mark}")
 
     if not has_rows:
         lines.append("Нет данных за выбранный период.")
@@ -337,9 +346,9 @@ def format_report(year, section_label, item_name, item_emoji, ind_key_used, plan
         total_pct = round(total_fact / total_plan * 100, 1) if total_plan > 0 else None
         lines.append("")
         if total_pct is not None:
-            lines.append(f"📈 Итого: план {total_plan} {UNIT} / факт {total_fact} {UNIT} ({total_pct}%)")
+            lines.append(f"📈 Итого: план {fmt_num(total_plan)} {UNIT} / факт {fmt_num(total_fact)} {UNIT} ({total_pct}%)")
         else:
-            lines.append(f"📈 Итого: план {total_plan} {UNIT} / факт {total_fact} {UNIT}")
+            lines.append(f"📈 Итого: план {fmt_num(total_plan)} {UNIT} / факт {fmt_num(total_fact)} {UNIT}")
 
     if fallback_note:
         lines.append(fallback_note)
